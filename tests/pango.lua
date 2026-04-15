@@ -35,8 +35,24 @@ function pango.glyphstring()
       local offset = items[i].offset
       local length = items[i].length
       local analysis = items[i].analysis
-      local pgs = Pango.GlyphString()
-      Pango.shape(string.sub(s,1+offset), length, analysis, pgs)
+      --
+      -- Fixes https://github.com/lgi-devs/lgi/issues/336
+      --
+      -- Implementation for the fix was a combination
+      -- of ideas from:
+      --
+      -- 1) my own investigation plus trial-error
+      -- 2) the comment: https://github.com/lgi-devs/lgi/issues/336#issuecomment-2888361271
+      -- 3) the LGI fork: https://github.com/vtrlx/LuaGObject/blob/0.10.5/tests/pango.lua#L38-L39
+      --
+      local pgs
+      if Pango.version_check(1, 56, 2) then
+         pgs = Pango.GlyphString()
+         Pango.shape(string.sub(s,1+offset), length, analysis, pgs)
+      else
+         pgs = Pango.shape(string.sub(s,1+offset), length, analysis)
+      end
+
       -- Pull out individual glyphs with pgs.glyphs
       local glyphs = pgs.glyphs
       check(type(glyphs) == 'table')
