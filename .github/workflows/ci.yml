@@ -2,110 +2,160 @@ name: CI
 
 on:
   push:
-    branches: [ master ]
+    branches: [ '*' ]
   pull_request:
     branches: [ master ]
 
-env:
-  # Force software rendering on CI, because
-  # we were getting a CI error on Ubuntu 24.04 as follows:
-  #   MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER))
-  # For more information, see https://github.com/lgi-devs/lgi/pull/332
-  LIBGL_ALWAYS_SOFTWARE: 1
-
 jobs:
-  build_puc:
-    name: Test on PUC-Rio Lua
+  test-linux:
+    name: Test on Linux
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
-        version: [5.1.5, 5.2.4, 5.3.6, 5.4.7, 5.5.0]
+        version: [5.1, 5.2, 5.3, 5.4, 5.5, luajit, openresty]
 
     env:
-      LUA_VERSION: ${{ matrix.version }}
-    
+      # Force software rendering on CI, because
+      # we were getting a CI error on Ubuntu 24.04 as follows:
+      #   MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER))
+      # For more information, see https://github.com/lgi-devs/lgi/pull/332
+      LIBGL_ALWAYS_SOFTWARE: 1
+
     steps:
-      - name: Install Lua dependencies
-        run: sudo apt install -y libreadline-dev
-      - name: Build PUC-Rio Lua ${{ matrix.version }}
-        run: |
-          wget "https://www.lua.org/ftp/lua-${LUA_VERSION}.tar.gz"
-          tar xzvf "lua-${LUA_VERSION}.tar.gz"
-          cd "lua-${LUA_VERSION}"
-          make linux SYSLIBS="-Wl,-E -ldl -lreadline" SYSCFLAGS="-DLUA_USE_LINUX -DLUA_USE_APICHECK" CC='gcc -g'
-      - name: Install PUC-Rio Lua ${{ matrix.version }}
-        run: |
-          cd "lua-${LUA_VERSION}"
-          sudo make install
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build dependencies
-        run: source .github/install_deps.bash
-      - name: Build lgi and the test suite
         run: |
-          make CC='gcc -g -fsanitize=address -fsanitize=undefined -ftest-coverage -fprofile-arcs'
-          make -C tests CC='gcc -g -fsanitize=address -fsanitize=undefined -ftest-coverage -fprofile-arcs' LUA_LIB='-llua -ldl -lm'
-      - name: Run tests
-        env:
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/.github/lsan.supp
-          UBSAN_OPTIONS: print_stacktrace=1:report_error_type=1:halt_on_error=1:suppressions=${{ github.workspace }}/.github/ubsan.supp
-        run: |
-          source .github/find_asan_ubsan.bash "lgi/corelgilua51.so"
-          xvfb-run -a sh -c 'LD_PRELOAD="${sanitizers}" make check'
-      - name: Check that make install works
-        env:
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/.github/lsan.supp
-          UBSAN_OPTIONS: print_stacktrace=1:report_error_type=1:halt_on_error=1:suppressions=${{ github.workspace }}/.github/ubsan.supp
-        run: |
-          source .github/find_asan_ubsan.bash "lgi/corelgilua51.so"
-          source .github/test_make_install.bash
-      - name: Upload coverage report to codecov.io
-        uses: codecov/codecov-action@v1
-
-  build_luajit:
-    name: Test on LuaJIT
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Set environment variable to hold LuaJIT checkout directory
-        run: echo "LUAJIT_CHECKOUT=$(uuidgen)" >> "${{ github.env }}"
-      - name: Checkout LuaJIT from github mirror
-        uses: actions/checkout@v4
+          sudo apt install -y \
+            libgirepository1.0-dev \
+            libcairo2-dev \
+            gir1.2-gtk-3.0 \
+            libffi-dev \
+            libglib2.0-dev \
+            xvfb \
+            dbus-x11
+      - name: Setup Lua
+        uses: luau-project/setup-lua@2fd21772b176af56eaa97076f0bfe29db1d88e99 # v2.0.2
         with:
-          repository: LuaJIT/LuaJIT
-          path: "${{ env.LUAJIT_CHECKOUT }}"
-      - name: Build LuaJIT
-        run: make -C "${{ env.LUAJIT_CHECKOUT }}" CC='gcc -g'
-      - name: Install LuaJIT ${{ matrix.version }}
+          lua-version: ${{ matrix.version }}
+          cflags-extra: -g;-DLUA_USE_APICHECK
+      - name: Set environment variables to hold flags for the build and tests
         run: |
-          sudo make -C "${{ env.LUAJIT_CHECKOUT }}" install
-          sudo ln -frs /usr/local/bin/luajit-* /usr/local/bin/lua
-          sudo ln -frs /usr/local/lib/libluajit-*.a /usr/local/lib/liblua.a
-          sudo ln -frs /usr/local/include/luajit-*/* /usr/local/include/
-      - name: Set LUA_VERSION environment variable from LuaJIT's pkg-config file
+          version=""
+          lua_pc=""
+          case "${{ matrix.version }}" in
+            luajit*|openresty*)
+              version+="5.1"
+              lua_pc+="luajit"
+              ;;
+            *)
+              lua_major="$(echo "${{ matrix.version }}" | cut -d. -f1)"
+              lua_minor="$(echo "${{ matrix.version }}" | cut -d. -f2)"
+              version+="${lua_major}.${lua_minor}"
+              lua_pc+="lua${lua_major}.${lua_minor}"
+              ;;
+          esac
+          echo "LUA_VERSION=${version}" >> "${{ github.env }}"
+          echo "LUA_PC=${lua_pc}" >> "${{ github.env }}"
+          echo "CFLAGS=$(pkg-config --cflags-only-I ${lua_pc})" >> "${{ github.env }}"
+          echo "LDFLAGS=$(pkg-config --libs-only-L ${lua_pc})" >> "${{ github.env }}"
+          echo "LUA_LIB=$(pkg-config --libs-only-l ${lua_pc})" >> "${{ github.env }}"
+      - name: Build lgi
         run: |
-          lua_version=$(PKG_CONFIG_PATH="/usr/local/lib/pkgconfig" pkg-config --variable=abiver luajit);
-          echo "LUA_VERSION=${lua_version}" >> "${{ github.env }}"
-      - uses: actions/checkout@v4
-      - name: Install build dependencies
-        run: source .github/install_deps.bash
-      - name: Build lgi and the test suite
+          make \
+            CC='gcc -g -fsanitize=address -fsanitize=undefined -ftest-coverage -fprofile-arcs' \
+            LUA_VERSION="${{ env.LUA_VERSION }}" \
+            LUA_LIB="${{ env.LUA_LIB }}" \
+            all
+      - name: Build the test suite
         run: |
-          make CC='gcc -g -fsanitize=address -fsanitize=undefined -ftest-coverage -fprofile-arcs'
-          make -C tests CC='gcc -g -fsanitize=address -fsanitize=undefined -ftest-coverage -fprofile-arcs' LUA_LIB='-llua -ldl -lm'
+          make \
+            -C tests \
+            CC='gcc -g -fsanitize=address -fsanitize=undefined -ftest-coverage -fprofile-arcs' \
+            LUA_VERSION="${{ env.LUA_VERSION }}" \
+            LUA_LIB="${{ env.LUA_LIB }}" \
+            all
+      - name: Set environment variables to run tests and install
+        run: |
+          sanitizers="$(ldd "lgi/corelgilua51.so" | awk -vORS=: '$1 ~ /lib(a|ub)san/ { print $3 ":" }')"
+          echo "SANITIZERS=${sanitizers}" >> "${{ github.env }}"
+          echo "LSAN_OPTIONS=suppressions=${{ github.workspace }}/.github/lsan.supp" >> "${{ github.env }}"
+          echo "UBSAN_OPTIONS=print_stacktrace=1:report_error_type=1:halt_on_error=1:suppressions=${{ github.workspace }}/.github/ubsan.supp" >> "${{ github.env }}"
       - name: Run tests
-        env:
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/.github/lsan.supp
-          UBSAN_OPTIONS: print_stacktrace=1:report_error_type=1:halt_on_error=1:suppressions=${{ github.workspace }}/.github/ubsan.supp
-        run: |
-          source .github/find_asan_ubsan.bash "lgi/corelgilua51.so"
-          xvfb-run -a sh -c 'LD_PRELOAD="${sanitizers}" make check'
+        run: xvfb-run -a sh -c 'LD_PRELOAD="${{ env.SANITIZERS }}" make LUA_VERSION="${{ env.LUA_VERSION }}" LUA_LIB="${{ env.LUA_LIB }}" check'
+      - name: Install lgi
+        run: sudo make install LUA_VERSION="${{ env.LUA_VERSION }}"
       - name: Check that make install works
-        env:
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/.github/lsan.supp
-          UBSAN_OPTIONS: print_stacktrace=1:report_error_type=1:halt_on_error=1:suppressions=${{ github.workspace }}/.github/ubsan.supp
         run: |
-          source .github/find_asan_ubsan.bash "lgi/corelgilua51.so"
-          source .github/test_make_install.bash
+          xvfb-run -a sh -c 'LD_PRELOAD="${{ env.SANITIZERS }}"' - lua -e '
+            Gtk = require("lgi").Gtk
+            c = Gtk.Grid()
+            w = Gtk.Label()
+            c:add(w)
+            assert(w.parent == c)
+            a, b = dofile("lgi/version.lua"), require("lgi.version")
+            assert(a == b, string.format("%s == %s", a, b))
+          '
+
       - name: Upload coverage report to codecov.io
-        uses: codecov/codecov-action@v1
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+
+  test-windows-msvc:
+    name: Test on Windows with MSVC
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: cmd
+
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [5.1, 5.2, 5.3, 5.4, 5.5, luajit, openresty]
+        gtk-major-version: [3, 4]
+
+    env:
+      PREFIX: ${{ github.workspace }}\.lua
+      WINGTK_URL: https://github.com/wingtk/gvsbuild/releases/download/2026.8.0/GTK${{ matrix.gtk-major-version }}_Gvsbuild_2026.8.0_x64.zip
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup MSVC dev-prompt
+        uses: step-security/msvc-dev-cmd@22c98154b708dbd743e6f27a933cf6ceba3305c4 # v1.13.1
+      - name: Setup Lua
+        uses: luau-project/setup-lua@2fd21772b176af56eaa97076f0bfe29db1d88e99 # v2.0.2
+        with:
+          lua-version: ${{ matrix.version }}
+      - name: Download GTK ${{ matrix.gtk-major-version }} prebuilt binaries (MSVC toolset) provided by wingtk
+        run: curl -LO "${{ env.WINGTK_URL }}"
+      - name: Extract GTK ${{ matrix.gtk-major-version }} zip file into PREFIX
+        run: |
+          FOR /F "tokens=* USEBACKQ" %%F IN (`""%PROGRAMFILES%\Git\usr\bin\basename.exe" "${{ env.WINGTK_URL }}""`) DO (
+            tar -C "${{ env.PREFIX }}" -xf "%%F"
+          )
+      # Python version must match the version built by wingtk
+      - name: Setup Python 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.14
+      - name: Install meson
+        run: pip install meson
+      - name: Set environment variable to hold the `pkg-config` file for PUC-Lua
+        if: ${{ !(matrix.version == 'luajit' || matrix.version == 'openresty') }}
+        run: |
+          FOR /F "tokens=* USEBACKQ" %%V IN (`lua -e "print(_VERSION:sub(5))"`) DO (
+            ECHO LUA_PC=lua%%V>>${{ github.env }}
+          )
+      - name: Configure lgi through meson (LuaJIT / OpenResty)
+        if: ${{ matrix.version == 'luajit' || matrix.version == 'openresty' }}
+        run: meson setup lgi-build . --prefix "${{ env.PREFIX }}" -Dlua-bin=luajit -Dtests=false
+      - name: Configure lgi through meson (PUC-Lua)
+        if: ${{ !(matrix.version == 'luajit' || matrix.version == 'openresty') }}
+        run: meson setup lgi-build . --prefix "${{ env.PREFIX }}" -Dlua-pc=${{ env.LUA_PC }} -Dtests=false
+      - name: Build lgi
+        run: meson compile -C lgi-build
+      - name: Install lgi
+        run: meson install -C lgi-build
+      - name: Test lgi
+        run: lua "${{ github.workspace }}\.github\test-for-msvc-ci.lua" ${{ matrix.gtk-major-version }}
