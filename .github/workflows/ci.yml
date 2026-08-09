@@ -11,10 +11,14 @@ jobs:
     name: Test on Linux
     runs-on: ubuntu-latest
 
+    container:
+      image: ${{ matrix.container }}
+
     strategy:
       fail-fast: false
       matrix:
         version: [5.1, 5.2, 5.3, 5.4, 5.5, luajit, openresty]
+        container: ['debian:stable', 'debian:unstable']
 
     env:
       # Force software rendering on CI, because
@@ -23,24 +27,40 @@ jobs:
       # For more information, see https://github.com/lgi-devs/lgi/pull/332
       LIBGL_ALWAYS_SOFTWARE: 1
 
+      # Runs apt without user prompts
+      DEBIAN_FRONTEND: noninteractive
+
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Update package list
+        run: apt update
       - name: Install build dependencies
         run: |
-          sudo apt install -y \
+          apt install -y \
+            build-essential \
+            git \
+            unzip \
+            libreadline-dev \
             libgirepository1.0-dev \
             libcairo2-dev \
             gir1.2-gtk-3.0 \
             libffi-dev \
             libglib2.0-dev \
             xvfb \
-            dbus-x11
+            dbus-x11 \
+            curl \
+            gpg
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Lua
         uses: luau-project/setup-lua@2fd21772b176af56eaa97076f0bfe29db1d88e99 # v2.0.2
         with:
           lua-version: ${{ matrix.version }}
           cflags-extra: -g;-DLUA_USE_APICHECK
       - name: Set environment variables to hold flags for the build and tests
+        shell: bash --noprofile --norc -eo pipefail {0}
         run: |
           version=""
           lua_pc=""
@@ -56,11 +76,11 @@ jobs:
               lua_pc+="lua${lua_major}.${lua_minor}"
               ;;
           esac
-          echo "LUA_VERSION=${version}" >> "${{ github.env }}"
-          echo "LUA_PC=${lua_pc}" >> "${{ github.env }}"
-          echo "CFLAGS=$(pkg-config --cflags-only-I ${lua_pc})" >> "${{ github.env }}"
-          echo "LDFLAGS=$(pkg-config --libs-only-L ${lua_pc})" >> "${{ github.env }}"
-          echo "LUA_LIB=$(pkg-config --libs-only-l ${lua_pc})" >> "${{ github.env }}"
+          echo "LUA_VERSION=${version}" >> "$GITHUB_ENV"
+          echo "LUA_PC=${lua_pc}" >> "$GITHUB_ENV"
+          echo "CFLAGS=$(pkg-config --cflags-only-I ${lua_pc})" >> "$GITHUB_ENV"
+          echo "LDFLAGS=$(pkg-config --libs-only-L ${lua_pc})" >> "$GITHUB_ENV"
+          echo "LUA_LIB=$(pkg-config --libs-only-l ${lua_pc})" >> "$GITHUB_ENV"
       - name: Build lgi
         run: |
           make \
@@ -77,18 +97,20 @@ jobs:
             LUA_LIB="${{ env.LUA_LIB }}" \
             all
       - name: Set environment variables to run tests and install
+        shell: bash --noprofile --norc -eo pipefail {0}
         run: |
           sanitizers="$(ldd "lgi/corelgilua51.so" | awk -vORS=: '$1 ~ /lib(a|ub)san/ { print $3 ":" }')"
-          echo "SANITIZERS=${sanitizers}" >> "${{ github.env }}"
-          echo "LSAN_OPTIONS=suppressions=${{ github.workspace }}/.github/lsan.supp" >> "${{ github.env }}"
-          echo "UBSAN_OPTIONS=print_stacktrace=1:report_error_type=1:halt_on_error=1:suppressions=${{ github.workspace }}/.github/ubsan.supp" >> "${{ github.env }}"
+          echo "SANITIZERS=${sanitizers}" >> "$GITHUB_ENV"
+          echo "LSAN_OPTIONS=suppressions=$GITHUB_WORKSPACE/.github/lsan.supp" >> "$GITHUB_ENV"
+          echo "UBSAN_OPTIONS=print_stacktrace=1:report_error_type=1:halt_on_error=1:suppressions=$GITHUB_WORKSPACE/.github/ubsan.supp" >> "$GITHUB_ENV"
       - name: Run tests
-        run: xvfb-run -a sh -c 'LD_PRELOAD="${{ env.SANITIZERS }}" make LUA_VERSION="${{ env.LUA_VERSION }}" LUA_LIB="${{ env.LUA_LIB }}" check'
+        run: xvfb-run -a sh -c 'env LD_PRELOAD="${{ env.SANITIZERS }}" make LUA_VERSION="${{ env.LUA_VERSION }}" LUA_LIB="${{ env.LUA_LIB }}" check'
       - name: Install lgi
-        run: sudo make install LUA_VERSION="${{ env.LUA_VERSION }}"
+        run: make install LUA_VERSION="${{ env.LUA_VERSION }}"
       - name: Check that make install works
+        shell: bash --noprofile --norc -eo pipefail {0}
         run: |
-          xvfb-run -a sh -c 'LD_PRELOAD="${{ env.SANITIZERS }}"' - lua -e '
+          xvfb-run -a sh -c 'env LD_PRELOAD="${{ env.SANITIZERS }}"' - lua -e '
             Gtk = require("lgi").Gtk
             c = Gtk.Grid()
             w = Gtk.Label()
@@ -116,7 +138,7 @@ jobs:
         gtk-major-version: [3, 4]
 
     env:
-      PREFIX: ${{ github.workspace }}\.lua
+      PREFIX: "%GITHUB_WORKSPACE%\\.lua"
       WINGTK_URL: https://github.com/wingtk/gvsbuild/releases/download/2026.8.0/GTK${{ matrix.gtk-major-version }}_Gvsbuild_2026.8.0_x64.zip
 
     steps:
@@ -145,7 +167,7 @@ jobs:
         if: ${{ !(matrix.version == 'luajit' || matrix.version == 'openresty') }}
         run: |
           FOR /F "tokens=* USEBACKQ" %%V IN (`lua -e "print(_VERSION:sub(5))"`) DO (
-            ECHO LUA_PC=lua%%V>>${{ github.env }}
+            ECHO LUA_PC=lua%%V>>%GITHUB_ENV%
           )
       - name: Configure lgi through meson (LuaJIT / OpenResty)
         if: ${{ matrix.version == 'luajit' || matrix.version == 'openresty' }}
@@ -158,4 +180,4 @@ jobs:
       - name: Install lgi
         run: meson install -C lgi-build
       - name: Test lgi
-        run: lua "${{ github.workspace }}\.github\test-for-msvc-ci.lua" ${{ matrix.gtk-major-version }}
+        run: lua "%GITHUB_WORKSPACE%\.github\test-for-msvc-ci.lua" ${{ matrix.gtk-major-version }}
